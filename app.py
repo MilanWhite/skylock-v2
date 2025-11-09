@@ -436,7 +436,7 @@ class App:
                 f"bearing {angle_deg:.0f}°, el {el_deg:.0f}°, hold {min(held,HOLD_MS)}/{HOLD_MS} ms",
                 True, MUTED
             )
-            self.screen.blit(dbg, (SCREEN_WIDTH//2 - dbg.get_width()//2, 250))
+            self.screen.blit(dbg, (SCREEN_WIDTH//2 - dbg.get_width()//2, 350))
 
         elif self.state == STATE_DANGER_Q:
             draw_centered_label(self.screen, self.h1, "Are you in danger?")
