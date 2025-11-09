@@ -414,7 +414,7 @@ class App:
 
             # rotate arrow (negative for clockwise screen rotation)
             arrow = pygame.transform.rotate(self.arrow_base, -self.arrow_angle_smooth_deg)  # CCW positive. :contentReference[oaicite:2]{index=2}
-            rect = arrow.get_rect(center=(SCREEN_WIDTH // 2, int(SCREEN_HEIGHT * 0.72)))
+            rect = arrow.get_rect(center=(SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2))
             self.screen.blit(arrow, rect)
 
             # alignment gate
