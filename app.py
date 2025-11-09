@@ -368,7 +368,7 @@ class App:
                 self.goto_sending()
             self.buttons = layout_buttons_center(
                 ["Checking in", "Low Battery", "Doing good"],
-                self.h2, self.screen, cols=3, btn_w=320, btn_h=76, gap=18, on_click=_status
+                self.h3, self.screen, cols=3, btn_w=130, btn_h=76, gap=18, on_click=_status
             )
         elif self.state == STATE_SENDING:
             self.buttons = []
