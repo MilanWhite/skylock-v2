@@ -432,18 +432,11 @@ class App:
 
             # debug readout
             held = 0 if self.align_ok_since_ms is None else now_ms - self.align_ok_since_ms
-# debug readout anchored above the footer and inside the card
             dbg = self.h3.render(
-                f"bearing {angle_deg:.0f}°, el {el_deg:.0f}°, hold {min(held, HOLD_MS)}/{HOLD_MS} ms",
+                f"bearing {angle_deg:.0f}°, el {el_deg:.0f}°, hold {min(held,HOLD_MS)}/{HOLD_MS} ms",
                 True, MUTED
             )
-            pad = 16  # same pad you used for the card
-            footer_h = self.small.get_height()  # height of footer font
-            bottom_margin = 12                   # spacing above footer
-            dbg_rect = dbg.get_rect(
-                midbottom=(SCREEN_WIDTH // 2, 400)
-            )
-            self.screen.blit(dbg, dbg_rect)
+            self.screen.blit(dbg, (SCREEN_WIDTH//2 - dbg.get_width()//2, 50))
 
         elif self.state == STATE_DANGER_Q:
             draw_centered_label(self.screen, self.h1, "Are you in danger?")
