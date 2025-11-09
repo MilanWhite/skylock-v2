@@ -171,6 +171,8 @@ class App:
         self.clock = pygame.time.Clock()
         self.running = True
 
+        self.sat_name = ""
+
         self.h1 = pygame.font.SysFont(None, 56)
         self.h2 = pygame.font.SysFont(None, 40)
         self.h3 = pygame.font.SysFont(None, 34)
@@ -286,6 +288,7 @@ class App:
                 DEFAULT_LAT, DEFAULT_LON, 0, when=datetime.now(timezone.utc)
             )
             self.sat_ecef_m = km_to_m_tuple(tuple(sat["position_ecef_km"]))
+            self.sat_name = str(sat.get("name", "")).strip()
         except Exception:
             pass
 
@@ -395,7 +398,7 @@ class App:
             draw_centered_label(self.screen, self.h3, "Press Start to begin", y_frac=0.42)
 
         elif self.state == STATE_POINT:
-            draw_centered_label(self.screen, self.h1, "Point device to satellite...")
+            draw_centered_label(self.screen, self.h2, f"Point device to {self.sat_name}" if self.sat_name else "Point device to satellite")
             draw_centered_label(self.screen, self.h3, "Hold steady to lock", y_frac=0.42)
 
             # live bearing to satellite
