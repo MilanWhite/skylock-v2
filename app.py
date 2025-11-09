@@ -6,6 +6,14 @@ from datetime import datetime, timezone
 import pygame
 from pygame.locals import QUIT, KEYDOWN, K_ESCAPE, MOUSEBUTTONUP
 
+from server.model.repository import SqliteTleRepository
+from server.service.satellite_service import Sgp4SatelliteService
+from compas import get_heading
+
+# init services
+repo = SqliteTleRepository()
+service = Sgp4SatelliteService(repo)
+
 # ---------- Device/telemetry defaults ----------
 DEVICE_ID = "DEV-123"
 DEFAULT_LAT = 43.7000
@@ -13,18 +21,8 @@ DEFAULT_LON = -79.4000
 DEFAULT_PDOP = 1.2
 POST_URL = "http://192.168.137.1:4000/api/pings"
 
-# ---------- Arrow math constants (assumed fixed for this build) ----------
-# Device geodetic position (WGS-84) and height in meters:
-DEV_LAT_DEG = 43.7000
-DEV_LON_DEG = -79.4000
-DEV_H_M = 250.0
-
-# Nearest satellite position in ECEF meters:
-SAT_ECEF_M = (15600000.0, -20400000.0, 13000000.0)
-
-# Compass inputs assumed constant here:
-MAG_HEADING_DEG = 15.0        # magnetic heading 0..360 (set from your sensor if available)
-DECLINATION_DEG = 10.0        # magnetic→true correction for your location/date
+# Use true-north bearing on screen: heading_true = magnetic + declination
+DECLINATION_DEG = 0.0   # set your local declination if needed
 
 # ---------- Config ----------
 SCREEN_WIDTH = 800
@@ -41,10 +39,9 @@ BTN_BG_HOVER = (48, 54, 65)
 BTN_BORDER = (80, 90, 110)
 
 # ---------- ENU helpers (WGS-84) ----------
-_A = 6378137.0                      # semi-major axis (m)
-_F = 1.0 / 298.257223563            # flattening
-_E2 = _F * (2.0 - _F)               # first eccentricity squared
-# ECEF→ENU rotation and az/el use standard formulas. :contentReference[oaicite:0]{index=0}
+_A = 6378137.0
+_F = 1.0 / 298.257223563
+_E2 = _F * (2.0 - _F)
 
 def geodetic_to_ecef(lat_deg, lon_deg, h_m):
     lat = math.radians(lat_deg); lon = math.radians(lon_deg)
@@ -55,7 +52,7 @@ def geodetic_to_ecef(lat_deg, lon_deg, h_m):
     y = (N + h_m) * cL * sλ
     z = (N * (1.0 - _E2) + h_m) * sL
     return x, y, z  # meters
-# WGS-84 parameters are standard. :contentReference[oaicite:1]{index=1}
+# WGS-84 geodetic→ECEF standard formula. :contentReference[oaicite:2]{index=2}
 
 def ecef_to_enu_vector(lat_deg, lon_deg, rx, ry, rz):
     lat = math.radians(lat_deg); lon = math.radians(lon_deg)
@@ -64,26 +61,27 @@ def ecef_to_enu_vector(lat_deg, lon_deg, rx, ry, rz):
     e = -sλ*rx +  cλ*ry
     n = -sL*cλ*rx + -sL*sλ*ry + cL*rz
     u =  cL*cλ*rx +  cL*sλ*ry + sL*rz
-    return e, n, u  # meters in ENU
-# Local-tangent ENU construction and relative vector rotation are textbook. :contentReference[oaicite:2]{index=2}
+    return e, n, u
+# Standard ECEF→ENU rotation. :contentReference[oaicite:3]{index=3}
 
 def az_el_from_enu(e, n, u):
-    az = math.degrees(math.atan2(e, n))                      # 0°=North, +East
+    az = math.degrees(math.atan2(e, n))            # 0°=N, +E
     el = math.degrees(math.atan2(u, math.hypot(e, n)))
     return az, el
-# Azimuth/elevation from ENU uses atan2(E,N) and atan2(U,√(E²+N²)). :contentReference[oaicite:3]{index=3}
 
-def bearing_to_satellite_deg(dev_lat, dev_lon, dev_h_m, sat_ecef_xyz, heading_mag_deg, declination_deg):
+def bearing_to_satellite_deg(dev_lat, dev_lon, dev_h_m, sat_ecef_m, heading_mag_deg, declination_deg):
     dx, dy, dz = geodetic_to_ecef(dev_lat, dev_lon, dev_h_m)
-    rx = sat_ecef_xyz[0] - dx
-    ry = sat_ecef_xyz[1] - dy
-    rz = sat_ecef_xyz[2] - dz
+    rx = sat_ecef_m[0] - dx
+    ry = sat_ecef_m[1] - dy
+    rz = sat_ecef_m[2] - dz
     e, n, u = ecef_to_enu_vector(dev_lat, dev_lon, rx, ry, rz)
     az_deg, el_deg = az_el_from_enu(e, n, u)
-    heading_true = (heading_mag_deg + declination_deg)
-    # Screen arrow rotation relative to device heading:
+    heading_true = heading_mag_deg + declination_deg
     angle_screen = (az_deg - heading_true) % 360.0
     return angle_screen, el_deg
+
+def km_to_m_tuple(t3):
+    return (t3[0]*1000.0, t3[1]*1000.0, t3[2]*1000.0)
 
 # ---------- Minimal UI primitives ----------
 class Button:
@@ -184,14 +182,27 @@ class App:
         self.yes_index = 0
 
         self.sending_started_at = None
-        self.post_result = None  # True/False/None
+        self.post_result = None
 
         # ---- Arrow graphics (build once) ----
         self.arrow_base = pygame.Surface((140, 140), pygame.SRCALPHA)
         cx, cy = 70, 70
         pygame.draw.polygon(self.arrow_base, TEXT, [(cx, 10), (cx-18, 60), (cx+18, 60)])
         pygame.draw.rect(self.arrow_base, TEXT, (cx-6, 60, 12, 58), border_radius=6)
-        # Rotations are counter-clockwise by default; negative angle rotates clockwise. :contentReference[oaicite:4]{index=4}
+        # Rotation uses pygame.transform.rotate (CCW positive; negative for clockwise). :contentReference[oaicite:4]{index=4}
+
+        # ---- Live sensors/state ----
+        self.heading_mag_deg = 0.0
+        self.sat_ecef_m = (0.0, 0.0, 0.0)
+        self.device_alt_m = 0.0  # set if you have baro/GNSS height
+
+        # ---- Timers ----
+        self.EVENT_COMPASS = pygame.USEREVENT + 1
+        self.EVENT_SAT = pygame.USEREVENT + 2
+        # 20 Hz compass, 1 Hz satellite query
+        pygame.time.set_timer(self.EVENT_COMPASS, 50)   # ms
+        pygame.time.set_timer(self.EVENT_SAT, 1000)     # ms
+        # Timers post events to the queue. :contentReference[oaicite:5]{index=5}
 
         self.build_ui()
 
@@ -243,6 +254,26 @@ class App:
         except Exception:
             return False
 
+    # ---------- Live inputs ----------
+    def _poll_compass(self):
+        try:
+            h = float(get_heading())  # 0..360 magnetic
+            # normalize
+            self.heading_mag_deg = (h % 360.0 + 360.0) % 360.0
+        except Exception:
+            # keep last value
+            pass
+
+    def _poll_nearest_satellite(self):
+        try:
+            sat = service.find_nearest_satellite(DEFAULT_LAT, DEFAULT_LON, 0,
+                                                 when=datetime.now(timezone.utc))
+            # position_ecef_km -> meters
+            self.sat_ecef_m = km_to_m_tuple(tuple(sat["position_ecef_km"]))
+        except Exception:
+            # keep last value
+            pass
+
     # ---------- State transitions ----------
     def reset_to_begin(self):
         print("[payload]", self.answers, "post_ok:", self.post_result)
@@ -253,6 +284,8 @@ class App:
         self.build_ui()
 
     def goto_point(self):
+        # refresh satellite immediately on entry
+        self._poll_nearest_satellite()
         self.state = STATE_POINT
         self.build_ui()
 
@@ -332,6 +365,10 @@ class App:
         elif event.type == MOUSEBUTTONUP:
             for b in self.buttons:
                 b.handle(event, self.mouse_pos)
+        elif event.type == self.EVENT_COMPASS:
+            self._poll_compass()
+        elif event.type == self.EVENT_SAT:
+            self._poll_nearest_satellite()
 
     # ---------- Draw ----------
     def draw(self):
@@ -347,19 +384,19 @@ class App:
             draw_centered_label(self.screen, self.h1, "Point device to sattelite...")
             draw_centered_label(self.screen, self.h3, "Align and press Continue", y_frac=0.42)
 
-            # --- Arrow computation and drawing ---
+            # live bearing to satellite
             angle_deg, el_deg = bearing_to_satellite_deg(
-                DEV_LAT_DEG, DEV_LON_DEG, DEV_H_M,
-                SAT_ECEF_M,
-                MAG_HEADING_DEG,
+                DEFAULT_LAT, DEFAULT_LON, self.device_alt_m,
+                self.sat_ecef_m,
+                self.heading_mag_deg,
                 DECLINATION_DEG
             )
-            # Rotate arrow; negative angle = clockwise (matches compass rose). :contentReference[oaicite:5]{index=5}
+            # rotate arrow (negative for clockwise screen rotation)
             arrow = pygame.transform.rotate(self.arrow_base, -angle_deg)
             rect = arrow.get_rect(center=(SCREEN_WIDTH // 2, int(SCREEN_HEIGHT * 0.72)))
             self.screen.blit(arrow, rect)
 
-            # Optional debug readout
+            # debug readout
             dbg = self.h3.render(f"bearing {angle_deg:.0f}°, el {el_deg:.0f}°", True, MUTED)
             self.screen.blit(dbg, (SCREEN_WIDTH//2 - dbg.get_width()//2, rect.bottom + 6))
 
