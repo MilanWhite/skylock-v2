@@ -22,7 +22,7 @@ DEFAULT_PDOP = 1.2
 POST_URL = "http://192.168.137.1:4000/api/pings"
 
 # Use true-north bearing on screen: heading_true = magnetic + declination
-DECLINATION_DEG = 0.0   # set your local declination if needed
+DECLINATION_DEG = 0.0
 
 # ---------- Config ----------
 SCREEN_WIDTH = 800
@@ -51,7 +51,7 @@ def geodetic_to_ecef(lat_deg, lon_deg, h_m):
     x = (N + h_m) * cL * cλ
     y = (N + h_m) * cL * sλ
     z = (N * (1.0 - _E2) + h_m) * sL
-    return x, y, z  # meters
+    return x, y, z
 
 def ecef_to_enu_vector(lat_deg, lon_deg, rx, ry, rz):
     lat = math.radians(lat_deg); lon = math.radians(lon_deg)
@@ -209,7 +209,7 @@ class App:
         # ---- Live sensors/state ----
         self.heading_mag_deg = 0.0
         self.sat_ecef_m = (0.0, 0.0, 0.0)
-        self.device_alt_m = 0.0  # set if you have baro/GNSS height
+        self.device_alt_m = 0.0
 
         # alignment gate variables
         self.arrow_angle_smooth_deg = 0.0
@@ -220,6 +220,7 @@ class App:
         self.EVENT_SAT = pygame.USEREVENT + 2
         pygame.time.set_timer(self.EVENT_COMPASS, 50)   # 20 Hz compass
         pygame.time.set_timer(self.EVENT_SAT, 1000)     # 1 Hz satellite fetch
+        # set_timer and get_ticks timing per docs. :contentReference[oaicite:1]{index=1}
 
         self.build_ui()
 
@@ -332,10 +333,8 @@ class App:
                 ["Start"], self.h2, self.screen, cols=1, btn_w=260, btn_h=88, on_click=_start
             )
         elif self.state == STATE_POINT:
-            def _cont(_btn): self.goto_danger_question()
-            self.buttons = layout_buttons_center(
-                ["Continue"], self.h2, self.screen, cols=1, btn_w=260, btn_h=88, on_click=_cont
-            )
+            # No Continue button during lock-on phase
+            self.buttons = []
         elif self.state == STATE_DANGER_Q:
             def _danger_click(btn):
                 choice = btn.data.lower()
@@ -396,8 +395,8 @@ class App:
             draw_centered_label(self.screen, self.h3, "Press Start to begin", y_frac=0.42)
 
         elif self.state == STATE_POINT:
-            draw_centered_label(self.screen, self.h1, "Point device to sattelite...")
-            draw_centered_label(self.screen, self.h3, "Align and press Continue", y_frac=0.42)
+            draw_centered_label(self.screen, self.h1, "Point device to satellite...")
+            draw_centered_label(self.screen, self.h3, "Hold steady to lock", y_frac=0.42)
 
             # live bearing to satellite
             angle_deg, el_deg = bearing_to_satellite_deg(
@@ -414,7 +413,7 @@ class App:
                 self.arrow_angle_smooth_deg = circular_ema(self.arrow_angle_smooth_deg, angle_deg, SMOOTH_ALPHA)
 
             # rotate arrow (negative for clockwise screen rotation)
-            arrow = pygame.transform.rotate(self.arrow_base, -self.arrow_angle_smooth_deg)
+            arrow = pygame.transform.rotate(self.arrow_base, -self.arrow_angle_smooth_deg)  # CCW positive. :contentReference[oaicite:2]{index=2}
             rect = arrow.get_rect(center=(SCREEN_WIDTH // 2, int(SCREEN_HEIGHT * 0.72)))
             self.screen.blit(arrow, rect)
 
@@ -450,9 +449,9 @@ class App:
             draw_centered_label(self.screen, self.h1, "Select a status")
 
         elif self.state == STATE_SENDING:
-            title = "Sending to sattelite..."
+            title = "Sending to satellite..."
             if self.post_result is False:
-                title = "Sending to sattelite... (retry later)"
+                title = "Sending to satellite... (retry later)"
             draw_centered_label(self.screen, self.h1, title)
             dots = ((pygame.time.get_ticks() // 400) % 4)
             msg = "." * dots
