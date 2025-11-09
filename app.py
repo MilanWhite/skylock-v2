@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-import sys, json, requests
+import sys, json, requests, math
 from datetime import datetime, timezone
 import pygame
 from pygame.locals import QUIT, KEYDOWN, K_ESCAPE, MOUSEBUTTONUP
@@ -11,7 +11,20 @@ DEVICE_ID = "DEV-123"
 DEFAULT_LAT = 43.7000
 DEFAULT_LON = -79.4000
 DEFAULT_PDOP = 1.2
-POST_URL = "http://192.168.137.1:4000/api/pings"  # include scheme
+POST_URL = "http://192.168.137.1:4000/api/pings"
+
+# ---------- Arrow math constants (assumed fixed for this build) ----------
+# Device geodetic position (WGS-84) and height in meters:
+DEV_LAT_DEG = 43.7000
+DEV_LON_DEG = -79.4000
+DEV_H_M = 250.0
+
+# Nearest satellite position in ECEF meters:
+SAT_ECEF_M = (15600000.0, -20400000.0, 13000000.0)
+
+# Compass inputs assumed constant here:
+MAG_HEADING_DEG = 15.0        # magnetic heading 0..360 (set from your sensor if available)
+DECLINATION_DEG = 10.0        # magnetic→true correction for your location/date
 
 # ---------- Config ----------
 SCREEN_WIDTH = 800
@@ -27,6 +40,51 @@ BTN_BG = (36, 41, 51)
 BTN_BG_HOVER = (48, 54, 65)
 BTN_BORDER = (80, 90, 110)
 
+# ---------- ENU helpers (WGS-84) ----------
+_A = 6378137.0                      # semi-major axis (m)
+_F = 1.0 / 298.257223563            # flattening
+_E2 = _F * (2.0 - _F)               # first eccentricity squared
+# ECEF→ENU rotation and az/el use standard formulas. :contentReference[oaicite:0]{index=0}
+
+def geodetic_to_ecef(lat_deg, lon_deg, h_m):
+    lat = math.radians(lat_deg); lon = math.radians(lon_deg)
+    sL, cL = math.sin(lat), math.cos(lat)
+    sλ, cλ = math.sin(lon), math.cos(lon)
+    N = _A / math.sqrt(1.0 - _E2 * sL * sL)
+    x = (N + h_m) * cL * cλ
+    y = (N + h_m) * cL * sλ
+    z = (N * (1.0 - _E2) + h_m) * sL
+    return x, y, z  # meters
+# WGS-84 parameters are standard. :contentReference[oaicite:1]{index=1}
+
+def ecef_to_enu_vector(lat_deg, lon_deg, rx, ry, rz):
+    lat = math.radians(lat_deg); lon = math.radians(lon_deg)
+    sL, cL = math.sin(lat), math.cos(lat)
+    sλ, cλ = math.sin(lon), math.cos(lon)
+    e = -sλ*rx +  cλ*ry
+    n = -sL*cλ*rx + -sL*sλ*ry + cL*rz
+    u =  cL*cλ*rx +  cL*sλ*ry + sL*rz
+    return e, n, u  # meters in ENU
+# Local-tangent ENU construction and relative vector rotation are textbook. :contentReference[oaicite:2]{index=2}
+
+def az_el_from_enu(e, n, u):
+    az = math.degrees(math.atan2(e, n))                      # 0°=North, +East
+    el = math.degrees(math.atan2(u, math.hypot(e, n)))
+    return az, el
+# Azimuth/elevation from ENU uses atan2(E,N) and atan2(U,√(E²+N²)). :contentReference[oaicite:3]{index=3}
+
+def bearing_to_satellite_deg(dev_lat, dev_lon, dev_h_m, sat_ecef_xyz, heading_mag_deg, declination_deg):
+    dx, dy, dz = geodetic_to_ecef(dev_lat, dev_lon, dev_h_m)
+    rx = sat_ecef_xyz[0] - dx
+    ry = sat_ecef_xyz[1] - dy
+    rz = sat_ecef_xyz[2] - dz
+    e, n, u = ecef_to_enu_vector(dev_lat, dev_lon, rx, ry, rz)
+    az_deg, el_deg = az_el_from_enu(e, n, u)
+    heading_true = (heading_mag_deg + declination_deg)
+    # Screen arrow rotation relative to device heading:
+    angle_screen = (az_deg - heading_true) % 360.0
+    return angle_screen, el_deg
+
 # ---------- Minimal UI primitives ----------
 class Button:
     def __init__(self, rect, label, font, on_click=None, data=None):
@@ -35,7 +93,6 @@ class Button:
         self.font = font
         self.on_click = on_click
         self.data = data
-
     def draw(self, surf, mouse_pos):
         hovered = self.rect.collidepoint(mouse_pos)
         bg = BTN_BG_HOVER if hovered else BTN_BG
@@ -44,7 +101,6 @@ class Button:
         text_surf = self.font.render(self.label, True, TEXT)
         text_rect = text_surf.get_rect(center=self.rect.center)
         surf.blit(text_surf, text_rect)
-
     def handle(self, event, mouse_pos):
         if event.type == MOUSEBUTTONUP and event.button == 1:
             if self.rect.collidepoint(mouse_pos):
@@ -116,10 +172,10 @@ class App:
             "injured": None,
             "alone": None,
             "threat_active": None,
-            "status": None,  # for "no" branch
+            "status": None,
         }
 
-        # yes-flow questions in order
+        # yes-flow questions
         self.yes_questions = [
             ("Are you injured?", "injured"),
             ("Are you alone?", "alone"),
@@ -130,24 +186,28 @@ class App:
         self.sending_started_at = None
         self.post_result = None  # True/False/None
 
+        # ---- Arrow graphics (build once) ----
+        self.arrow_base = pygame.Surface((140, 140), pygame.SRCALPHA)
+        cx, cy = 70, 70
+        pygame.draw.polygon(self.arrow_base, TEXT, [(cx, 10), (cx-18, 60), (cx+18, 60)])
+        pygame.draw.rect(self.arrow_base, TEXT, (cx-6, 60, 12, 58), border_radius=6)
+        # Rotations are counter-clockwise by default; negative angle rotates clockwise. :contentReference[oaicite:4]{index=4}
+
         self.build_ui()
 
     # ---------- Helpers ----------
     def _answers_list(self):
-        """Return list of {'q': key, 'a': 'yes'|'no'|status} in fixed order."""
         out = []
         order = ["in_danger", "injured", "alone", "threat_active", "status"]
         for k in order:
             v = self.answers.get(k)
             if v is None:
                 continue
-            # normalize status labels to snake_case values
             if k == "status":
                 mapping = {
                     "Checking in": "checking_in",
                     "Low Battery": "low_battery",
                     "Doing good": "doing_good",
-                    # already-normalized values pass through
                     "checking_in": "checking_in",
                     "low_battery": "low_battery",
                     "doing_good": "doing_good",
@@ -158,7 +218,6 @@ class App:
 
     def _build_payload(self):
         answers_list = self._answers_list()
-        # mode depends on first answer (in_danger)
         first = next((a for a in answers_list if a["q"] == "in_danger"), None)
         mode = "SOS" if (first and first["a"] == "yes") else "OK"
         payload = {
@@ -173,7 +232,6 @@ class App:
         return payload
 
     def _post_payload(self, payload):
-        # Matches your required pattern; json= is simpler, but we follow your snippet. :contentReference[oaicite:1]{index=1}
         try:
             r = requests.post(
                 POST_URL,
@@ -213,7 +271,6 @@ class App:
     def goto_sending(self):
         self.state = STATE_SENDING
         self.sending_started_at = pygame.time.get_ticks()
-        # Build and send immediately; UI continues to animate.
         payload = self._build_payload()
         self.post_result = self._post_payload(payload)
         self.build_ui()
@@ -285,16 +342,37 @@ class App:
         if self.state == STATE_BEGIN:
             draw_centered_label(self.screen, self.h1, "Begin Search")
             draw_centered_label(self.screen, self.h3, "Press Start to begin", y_frac=0.42)
+
         elif self.state == STATE_POINT:
             draw_centered_label(self.screen, self.h1, "Point device to sattelite...")
             draw_centered_label(self.screen, self.h3, "Align and press Continue", y_frac=0.42)
+
+            # --- Arrow computation and drawing ---
+            angle_deg, el_deg = bearing_to_satellite_deg(
+                DEV_LAT_DEG, DEV_LON_DEG, DEV_H_M,
+                SAT_ECEF_M,
+                MAG_HEADING_DEG,
+                DECLINATION_DEG
+            )
+            # Rotate arrow; negative angle = clockwise (matches compass rose). :contentReference[oaicite:5]{index=5}
+            arrow = pygame.transform.rotate(self.arrow_base, -angle_deg)
+            rect = arrow.get_rect(center=(SCREEN_WIDTH // 2, int(SCREEN_HEIGHT * 0.72)))
+            self.screen.blit(arrow, rect)
+
+            # Optional debug readout
+            dbg = self.h3.render(f"bearing {angle_deg:.0f}°, el {el_deg:.0f}°", True, MUTED)
+            self.screen.blit(dbg, (SCREEN_WIDTH//2 - dbg.get_width()//2, rect.bottom + 6))
+
         elif self.state == STATE_DANGER_Q:
             draw_centered_label(self.screen, self.h1, "Are you in danger?")
+
         elif self.state == STATE_YES_FLOW:
             q_text, _ = self.yes_questions[self.yes_index]
             draw_centered_label(self.screen, self.h1, q_text)
+
         elif self.state == STATE_NO_FLOW:
             draw_centered_label(self.screen, self.h1, "Select a status")
+
         elif self.state == STATE_SENDING:
             title = "Sending to sattelite..."
             if self.post_result is False:
