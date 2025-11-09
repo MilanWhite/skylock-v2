@@ -52,7 +52,6 @@ def geodetic_to_ecef(lat_deg, lon_deg, h_m):
     y = (N + h_m) * cL * sλ
     z = (N * (1.0 - _E2) + h_m) * sL
     return x, y, z  # meters
-# WGS-84 geodetic→ECEF standard formula. :contentReference[oaicite:2]{index=2}
 
 def ecef_to_enu_vector(lat_deg, lon_deg, rx, ry, rz):
     lat = math.radians(lat_deg); lon = math.radians(lon_deg)
@@ -62,7 +61,6 @@ def ecef_to_enu_vector(lat_deg, lon_deg, rx, ry, rz):
     n = -sL*cλ*rx + -sL*sλ*ry + cL*rz
     u =  cL*cλ*rx +  cL*sλ*ry + sL*rz
     return e, n, u
-# Standard ECEF→ENU rotation. :contentReference[oaicite:3]{index=3}
 
 def az_el_from_enu(e, n, u):
     az = math.degrees(math.atan2(e, n))            # 0°=N, +E
@@ -82,6 +80,24 @@ def bearing_to_satellite_deg(dev_lat, dev_lon, dev_h_m, sat_ecef_m, heading_mag_
 
 def km_to_m_tuple(t3):
     return (t3[0]*1000.0, t3[1]*1000.0, t3[2]*1000.0)
+
+# ---------- Alignment gate (hold-to-continue) ----------
+ANGLE_TOL_DEG = 12.0      # tolerance around forward (0°)
+HOLD_MS = 2000            # must stay inside tolerance this long
+SMOOTH_ALPHA = 0.25       # circular EMA smoothing 0..1
+
+def ang_wrap_deg(a):
+    return (a % 360.0 + 360.0) % 360.0
+
+def ang_diff_deg(a, b):
+    d = (a - b + 180.0) % 360.0 - 180.0
+    return d
+
+def circular_ema(prev_deg, new_deg, alpha):
+    pr = math.radians(prev_deg); nr = math.radians(new_deg)
+    x = (1 - alpha) * math.cos(pr) + alpha * math.cos(nr)
+    y = (1 - alpha) * math.sin(pr) + alpha * math.sin(nr)
+    return ang_wrap_deg(math.degrees(math.atan2(y, x)))
 
 # ---------- Minimal UI primitives ----------
 class Button:
@@ -189,20 +205,21 @@ class App:
         cx, cy = 70, 70
         pygame.draw.polygon(self.arrow_base, TEXT, [(cx, 10), (cx-18, 60), (cx+18, 60)])
         pygame.draw.rect(self.arrow_base, TEXT, (cx-6, 60, 12, 58), border_radius=6)
-        # Rotation uses pygame.transform.rotate (CCW positive; negative for clockwise). :contentReference[oaicite:4]{index=4}
 
         # ---- Live sensors/state ----
         self.heading_mag_deg = 0.0
         self.sat_ecef_m = (0.0, 0.0, 0.0)
         self.device_alt_m = 0.0  # set if you have baro/GNSS height
 
+        # alignment gate variables
+        self.arrow_angle_smooth_deg = 0.0
+        self.align_ok_since_ms = None
+
         # ---- Timers ----
         self.EVENT_COMPASS = pygame.USEREVENT + 1
         self.EVENT_SAT = pygame.USEREVENT + 2
-        # 20 Hz compass, 1 Hz satellite query
-        pygame.time.set_timer(self.EVENT_COMPASS, 50)   # ms
-        pygame.time.set_timer(self.EVENT_SAT, 1000)     # ms
-        # Timers post events to the queue. :contentReference[oaicite:5]{index=5}
+        pygame.time.set_timer(self.EVENT_COMPASS, 50)   # 20 Hz compass
+        pygame.time.set_timer(self.EVENT_SAT, 1000)     # 1 Hz satellite fetch
 
         self.build_ui()
 
@@ -258,20 +275,17 @@ class App:
     def _poll_compass(self):
         try:
             h = float(get_heading())  # 0..360 magnetic
-            # normalize
             self.heading_mag_deg = (h % 360.0 + 360.0) % 360.0
         except Exception:
-            # keep last value
             pass
 
     def _poll_nearest_satellite(self):
         try:
-            sat = service.find_nearest_satellite(DEFAULT_LAT, DEFAULT_LON, 0,
-                                                 when=datetime.now(timezone.utc))
-            # position_ecef_km -> meters
+            sat = service.find_nearest_satellite(
+                DEFAULT_LAT, DEFAULT_LON, 0, when=datetime.now(timezone.utc)
+            )
             self.sat_ecef_m = km_to_m_tuple(tuple(sat["position_ecef_km"]))
         except Exception:
-            # keep last value
             pass
 
     # ---------- State transitions ----------
@@ -284,8 +298,9 @@ class App:
         self.build_ui()
 
     def goto_point(self):
-        # refresh satellite immediately on entry
-        self._poll_nearest_satellite()
+        self._poll_nearest_satellite()  # refresh target on entry
+        self.align_ok_since_ms = None
+        self.arrow_angle_smooth_deg = 0.0
         self.state = STATE_POINT
         self.build_ui()
 
@@ -391,13 +406,37 @@ class App:
                 self.heading_mag_deg,
                 DECLINATION_DEG
             )
+
+            # initialize smoothing to avoid jump on first draw
+            if self.align_ok_since_ms is None and self.arrow_angle_smooth_deg == 0.0:
+                self.arrow_angle_smooth_deg = angle_deg
+            else:
+                self.arrow_angle_smooth_deg = circular_ema(self.arrow_angle_smooth_deg, angle_deg, SMOOTH_ALPHA)
+
             # rotate arrow (negative for clockwise screen rotation)
-            arrow = pygame.transform.rotate(self.arrow_base, -angle_deg)
+            arrow = pygame.transform.rotate(self.arrow_base, -self.arrow_angle_smooth_deg)
             rect = arrow.get_rect(center=(SCREEN_WIDTH // 2, int(SCREEN_HEIGHT * 0.72)))
             self.screen.blit(arrow, rect)
 
+            # alignment gate
+            inside = abs(ang_diff_deg(self.arrow_angle_smooth_deg, 0.0)) <= ANGLE_TOL_DEG and el_deg > 0.0
+            now_ms = pygame.time.get_ticks()
+            if inside:
+                if self.align_ok_since_ms is None:
+                    self.align_ok_since_ms = now_ms
+            else:
+                self.align_ok_since_ms = None
+
+            if self.align_ok_since_ms is not None and (now_ms - self.align_ok_since_ms) >= HOLD_MS:
+                self.align_ok_since_ms = None
+                self.goto_danger_question()
+
             # debug readout
-            dbg = self.h3.render(f"bearing {angle_deg:.0f}°, el {el_deg:.0f}°", True, MUTED)
+            held = 0 if self.align_ok_since_ms is None else now_ms - self.align_ok_since_ms
+            dbg = self.h3.render(
+                f"bearing {angle_deg:.0f}°, el {el_deg:.0f}°, hold {min(held,HOLD_MS)}/{HOLD_MS} ms",
+                True, MUTED
+            )
             self.screen.blit(dbg, (SCREEN_WIDTH//2 - dbg.get_width()//2, rect.bottom + 6))
 
         elif self.state == STATE_DANGER_Q:
