@@ -441,7 +441,7 @@ class App:
             footer_h = self.small.get_height()  # height of footer font
             bottom_margin = 12                   # spacing above footer
             dbg_rect = dbg.get_rect(
-                midbottom=(SCREEN_WIDTH // 2, SCREEN_HEIGHT - pad - bottom_margin - footer_h)
+                midbottom=(SCREEN_WIDTH // 2, 400)
             )
             self.screen.blit(dbg, dbg_rect)
 
