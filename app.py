@@ -11,7 +11,7 @@ DEVICE_ID = "DEV-123"
 DEFAULT_LAT = 43.7000
 DEFAULT_LON = -79.4000
 DEFAULT_PDOP = 1.2
-POST_URL = "http://192.168.137.1/api/pings"  # include scheme
+POST_URL = "http://192.168.137.1:4000/api/pings"  # include scheme
 
 # ---------- Config ----------
 SCREEN_WIDTH = 800
